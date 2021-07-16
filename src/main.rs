@@ -72,8 +72,7 @@ async fn go(opt: Opt, mut sender: Sender) -> Result<()> {
     println!("canvas: {}x{} ({} pixels)", width, height, total_size);
 
     let img = apply_options_to_image(&opt, canvas_size, img)?;
-    // This operation seemingly cannot fail, so just `unwrap`.
-    let img_buffer = img.as_rgb8().unwrap();
+    let img_buffer = img.to_rgb8();
 
     let pixels: Vec<(Vec2, Rgb)> = img_buffer
         .enumerate_pixels()
