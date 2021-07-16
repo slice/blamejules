@@ -1,8 +1,10 @@
 use std::string::ToString;
 
 use anyhow::Result;
+use rand::prelude::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::sync::mpsc;
 
 /// A 2D vector.
 #[derive(Copy, Clone, Debug)]
@@ -18,7 +20,7 @@ impl From<image::Rgb<u8>> for Rgb {
     }
 }
 
-/// A pixelflut command.
+/// A Pixelflut command.
 #[derive(Copy, Clone, Debug)]
 pub enum Cmd {
     Help,
@@ -43,14 +45,13 @@ impl ToString for Cmd {
     }
 }
 
-/// Handles sending pixelflut pixels.
-pub struct Sender {
-    /// The buffered TCP stream representing the connection we have to the server.
-    sock: BufReader<TcpStream>,
+/// A connection to a Pixelflut server.
+pub struct Sock {
+    inner: BufReader<TcpStream>,
 }
 
-impl Sender {
-    /// Connects to a pixelflut server.
+impl Sock {
+    /// Connects to a Pixelflut server.
     pub async fn connect<A>(addr: A) -> Result<Self>
     where
         A: ToSocketAddrs,
@@ -58,23 +59,83 @@ impl Sender {
         let stream = TcpStream::connect(addr).await?;
         let buf = BufReader::new(stream);
 
-        Ok(Self { sock: buf })
+        Ok(Self { inner: buf })
     }
 
-    /// Sends a pixelflut command to the server.
+    /// Reads a line from the server.
+    pub async fn read_line(&mut self) -> Result<String> {
+        let mut response = String::new();
+        self.inner.read_line(&mut response).await?;
+        Ok(response)
+    }
+
+    /// Sends a command to the server.
     pub async fn send(&mut self, cmd: Cmd) -> Result<()> {
         let cmd = cmd.to_string() + "\n";
-        self.sock.write_all(cmd.as_bytes()).await?;
-        self.sock.flush().await?;
+        self.inner.write_all(cmd.as_bytes()).await?;
+        self.inner.flush().await?;
+        Ok(())
+    }
+
+    /// Consumes this `Sock` in order to spawn a channel that is used to send commands to the inner socket.
+    pub fn boot(mut self) -> mpsc::Sender<Cmd> {
+        let (tx, mut rx): (mpsc::Sender<Cmd>, mpsc::Receiver<_>) = mpsc::channel(1024);
+
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let Err(err) = self.send(cmd).await {
+                    eprintln!("failed to send cmd: {:?}", err);
+                }
+            }
+        });
+
+        tx
+    }
+}
+
+/// Handles mass-sending pixels to Pixelflut servers.
+pub struct Sender {
+    main_sock: Sock,
+    txs: Vec<mpsc::Sender<Cmd>>,
+}
+
+impl Sender {
+    /// Connects to a Pixelflut server.
+    pub async fn connect<A>(addr: A, n_sender_socks: usize) -> Result<Self>
+    where
+        A: ToSocketAddrs,
+    {
+        let mut txs = Vec::new();
+
+        assert!(n_sender_socks > 0, "you must spawn at least one socket");
+
+        for _ in 0..=n_sender_socks {
+            let sock = Sock::connect(&addr).await?;
+            txs.push(sock.boot());
+        }
+
+        Ok(Self {
+            main_sock: Sock::connect(&addr).await?,
+            txs,
+        })
+    }
+
+    /// Pick a transmitter to use to interact with the server.
+    fn pick_tx(&self) -> &mpsc::Sender<Cmd> {
+        let mut rng = thread_rng();
+        self.txs.choose(&mut rng).unwrap()
+    }
+
+    /// Enqueue a Pixelflut command to be sent to the server.
+    pub async fn send(&self, cmd: Cmd) -> Result<()> {
+        self.pick_tx().send(cmd).await?;
         Ok(())
     }
 
     /// Queries the size of the canvas.
     pub async fn query_size(&mut self) -> Result<Vec2> {
-        self.send(Cmd::Size).await?;
-
-        let mut size_response = String::new();
-        self.sock.read_line(&mut size_response).await?;
+        self.main_sock.send(Cmd::Size).await?;
+        let size_response = self.main_sock.read_line().await?;
 
         let mut split = size_response.trim_end().splitn(3, ' ').skip(1);
         let width: u32 = split

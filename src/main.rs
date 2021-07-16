@@ -1,14 +1,13 @@
+use std::convert::TryInto;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures::stream::{self, StreamExt};
 use image::imageops::FilterType;
 use image::GenericImageView;
 use structopt::StructOpt;
-use tokio::sync::Mutex;
 
-use blamejules::{Cmd, Sender, Vec2};
+use blamejules::{Cmd, Rgb, Sender, Vec2};
 
 #[derive(StructOpt)]
 #[structopt(name = "blamejules", about = "pixelflut client")]
@@ -21,12 +20,17 @@ struct Opt {
     #[structopt(long)]
     stretch_image: PathBuf,
 
-    /// The number of futures allowed to run at once
-    #[structopt(short = "j", long, default_value = "256")]
-    futures: usize,
+    /// The number of simultaneous connections used to paint pixels
+    #[structopt(short = "c", long, default_value = "4")]
+    connections: usize,
+
+    /// How many evenly-sized chunks to split the image into and concurrently
+    /// schedule pixel paints from
+    #[structopt(short = "k", long, default_value = "4")]
+    chunks: u32,
 
     /// Make painted images extremely low quality
-    #[structopt(short, long)]
+    #[structopt(long)]
     crunch: bool,
 
     /// The size to resize images down to when crunching
@@ -64,33 +68,50 @@ async fn go(opt: Opt, mut sender: Sender) -> Result<()> {
 
     let canvas_size = sender.query_size().await?;
     let Vec2(width, height) = canvas_size;
-    println!("canvas: {}x{} ({} pixels)", width, height, width * height);
+    let total_size = width * height;
+    println!("canvas: {}x{} ({} pixels)", width, height, total_size);
 
-    let arc = Arc::new(Mutex::new(sender));
-
-    println!("sending...");
-
-    // This operation seemingly cannot fail, so just `unwrap`.
     let img = apply_options_to_image(&opt, canvas_size, img)?;
+    // This operation seemingly cannot fail, so just `unwrap`.
     let img_buffer = img.as_rgb8().unwrap();
 
-    stream::iter(img_buffer.enumerate_pixels())
-        .map(|(x, y, pixel)| {
-            let sock = Arc::clone(&arc);
-            async move {
-                sock.lock()
-                    .await
-                    .send(Cmd::SetPx(Vec2(x, y), (*pixel).into()))
-                    .await
+    let pixels: Vec<(Vec2, Rgb)> = img_buffer
+        .enumerate_pixels()
+        .map(|(x, y, color)| (Vec2(x, y), (*color).into()))
+        .collect();
+
+    let arc = Arc::new(sender);
+
+    // Evenly divide the image into chunks.
+    let chunk_size: usize = (total_size / opt.chunks).try_into().unwrap();
+    let chunks = pixels.chunks(chunk_size);
+
+    println!(
+        "sending (chunks: {}, chunk size: {})...",
+        opt.chunks, chunk_size
+    );
+
+    async fn send_chunk(sender: Arc<Sender>, chunk: &[(Vec2, Rgb)]) {
+        for (coordinate, pixel) in chunk {
+            if let Err(err) = sender.send(Cmd::SetPx(*coordinate, *pixel)).await {
+                eprintln!(
+                    "failed to paint pixel @ {:?} with {:?}, because: {:?}",
+                    coordinate, pixel, err
+                );
             }
-        })
-        .buffer_unordered(opt.futures)
-        .for_each(|result| async {
-            if let Err(error) = result {
-                eprintln!("fail: {}", error);
-            }
-        })
-        .await;
+        }
+    }
+
+    // Concurrently send the pixels from each chunk.
+    let futures = chunks.map(|chunk| {
+        let sender = Arc::clone(&arc);
+        async move {
+            send_chunk(sender, chunk).await;
+        }
+    });
+
+    // Wait for all chunks to finish sending pixels.
+    futures::future::join_all(futures).await;
 
     println!("done!");
 
@@ -106,8 +127,8 @@ async fn main() -> Result<()> {
         .next()
         .ok_or_else(|| anyhow::anyhow!("failed to lookup server"))?;
 
-    print!("connecting... ");
-    let sender = Sender::connect(addr).await?;
+    print!("connecting ({} + 1 sockets)... ", opt.connections);
+    let sender = Sender::connect(addr, opt.connections).await?;
     println!("connected.");
 
     go(opt, sender).await?;

@@ -9,6 +9,7 @@ futures = "0.3"
 anyhow = "1"
 structopt = { version = "0.3", default-features = false }
 tokio = { version = "1.8.0", features = ["full"] }
+rand = "0.8"
 
 [[bin]]
 name = "blj"
