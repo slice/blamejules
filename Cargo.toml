@@ -1,0 +1,15 @@
+[package]
+name = "blamejules"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+image = "0.23"
+futures = "0.3"
+anyhow = "1"
+structopt = { version = "0.3", default-features = false }
+tokio = { version = "1.8.0", features = ["full"] }
+
+[[bin]]
+name = "blj"
+path = "src/main.rs"
