@@ -91,11 +91,29 @@ impl Sock {
 
         tx
     }
+
+    /// Queries the size of the canvas.
+    pub async fn query_size(&mut self) -> Result<Vec2> {
+        self.send(Cmd::Size).await?;
+        let size_response = self.read_line().await?;
+
+        let mut split = size_response.trim_end().splitn(3, ' ').skip(1);
+        let width: u32 = split
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("server gave no width in response to SIZE"))?
+            .parse()?;
+        let height: u32 = split
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("server gave no height in response to SIZE"))?
+            .parse()?;
+
+        Ok(Vec2(width, height))
+    }
 }
 
 /// Handles mass-sending pixels to Pixelflut servers.
 pub struct Sender {
-    main_sock: Sock,
+    pub sock: Sock,
     txs: Vec<mpsc::Sender<Cmd>>,
 }
 
@@ -115,7 +133,7 @@ impl Sender {
         }
 
         Ok(Self {
-            main_sock: Sock::connect(&addr).await?,
+            sock: Sock::connect(&addr).await?,
             txs,
         })
     }
@@ -130,23 +148,5 @@ impl Sender {
     pub async fn send(&self, cmd: Cmd) -> Result<()> {
         self.pick_tx().send(cmd).await?;
         Ok(())
-    }
-
-    /// Queries the size of the canvas.
-    pub async fn query_size(&mut self) -> Result<Vec2> {
-        self.main_sock.send(Cmd::Size).await?;
-        let size_response = self.main_sock.read_line().await?;
-
-        let mut split = size_response.trim_end().splitn(3, ' ').skip(1);
-        let width: u32 = split
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("server gave no width in response to SIZE"))?
-            .parse()?;
-        let height: u32 = split
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("server gave no height in response to SIZE"))?
-            .parse()?;
-
-        Ok(Vec2(width, height))
     }
 }

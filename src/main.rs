@@ -66,7 +66,7 @@ async fn go(opt: Opt, mut sender: Sender) -> Result<()> {
         img.color()
     );
 
-    let canvas_size = sender.query_size().await?;
+    let canvas_size = sender.sock.query_size().await?;
     let Vec2(width, height) = canvas_size;
     let total_size = width * height;
     println!("canvas: {}x{} ({} pixels)", width, height, total_size);
